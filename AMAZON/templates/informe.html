@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compra</title>
+</head>
+<body>
+    <table style="width:40%; border-collapse:collapse;" align="center" border="1px solid black">
+        <h3 style="text-align: center;">Información compra</h3>
+        <tr align="center">
+            <th style="padding:15px">Concepto</th>
+            <th style="padding:15px">Información</th>
+        </tr>
+        <tr>
+            <td style="padding:15px">Identificador de la compra</td>
+            <td style="padding:15px">{{id_venta}}</td>
+        </tr>
+        <tr>
+            <td style="padding:15px">Tarjeta</td>
+            <td style="padding:15px">{{tarjeta}}</td>
+        </tr>
+        <tr>
+            <td style="padding:15px">Transportista</td>
+            <td style="padding:15px">{{transportista}}</td>
+        </tr>
+        <tr>
+            <td style="padding:15px">Fecha de llegada</td>
+            <td style="padding:15px">{{fecha_final}}</td>
+        </tr>
+   
+    </table>
+    
+    <table style="width:40%; border-collapse:collapse;" align="center">
+    	<h3 style="text-align: center; padding-top: 10px;">Información cobro</h3>
+    </table>
+    
+    
+    
+    <table style="width:40%; border-collapse:collapse;" align="center" border="1px solid black"> 
+    	<tr align="center">
+            <th style="padding:15px">Precio</th>
+            <th style="padding:15px">Valor</th>
+        </tr>
+    
+        <tr style="padding-top: 20px;">
+            <td style="padding:15px">Precio de compra</td>
+            <td align="center" style="padding:15px">{{precio_venta}}€</td>
+        </tr>
+        <tr>
+            <td style="padding:15px">Precio de envio</td>
+            <td align="center" style="padding:15px">{{precio_envio}}€</td>
+        </tr>
+        <tr>
+            <th style="padding:15px">Total</th>
+            <th align="center" style="padding:15px">{{precio_total}}€</th>
+        </tr>
+
+    </table>
+</body>
+</html>

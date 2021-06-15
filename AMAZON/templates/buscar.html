@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buscar productos</title>
+    <script>
+        function validateList(){
+            const texts = document.querySelectorAll('.input_compra');
+            for (var i = 0; i < texts.length; i++){
+                if (texts[i].value.length == 0){
+                    alert(`El campo ${texts[i].name} no puede ser vacio`);
+                    return false
+                }
+            }
+            const checkboxes = document.querySelectorAll('input[name="product_checkbox"]:checked');
+            if (checkboxes.length == 0) {
+                alert("Seleccionar almenos un producto, no se puede realizar compras vacias")
+                return false;
+            }
+            return true;
+        }
+    </script>
+</head>
+<body>
+        <h1  align="center" >Buscar productos</h1>
+        {% if not productos %}
+            {% if b%}
+                <h3 align="center">No se ha encontrado ningún producto. Inténtalo de nuevo. </h3>
+            {% else %}
+                <form method="post">
+                    <table style="width:11%; border-collapse:collapse;" align="center">
+                        <tr><td><input type="text" name="nombre" placeholder="Nombre..."/></td> </tr>
+                        <tr><td><input type="number" name="precio_min" step="0.1" min="0.0" placeholder="Precio minimo..."/></td> </tr>
+                        <tr><td><input type="number" name="precio_max" step="0.1" min="0.0" placeholder="Precio maximo..."/></td> </tr>
+                        <tr><td><input type="submit" name="submit" value="Buscar"></td> </tr>
+                        <tr><td><a href="javascript:history.back()" style="color: black; text-decoration: none;"  ><span  style="font-size: 130%"> &#8592;</span> Volver </a></span></td> </tr>
+                    </table>
+                    
+                </form>
+            {% endif %}
+        {% else %}
+            <form name="productsForm" method="post" onsubmit="return validateList()" action="/buscar">
+                <table style="width:85%; border-collapse:collapse;" align="center" border="1px solid black">
+                    <tr align="left">
+                        <th style="padding:15px">Nombre</th>
+                        <th style="padding:15px">Precio</th>
+                        <th style="padding:15px">Marca</th>
+                        <th style="padding:15px">Categoria</th>
+                        <th style="padding:15px">Descripcion</th>
+                        <th style="padding:15px">Comprar</th>
+                    </tr>
+                    {% for p in productos %}
+                        <tr>
+                            <td style="padding:15px">{{p["nombre_producto"]}}</td>
+                            <td style="padding:15px">{{p["precio_producto"]}}€</td>
+                            <td style="padding:15px">{{p["marca"]}}</td>
+                            <td style="padding:15px">{{p["categoria"]}}</td>
+                            <td style="padding:15px">{{p["descripcion_producto"]}}</td>
+                            <td style="padding:15px"><input  type="checkbox" name="product_checkbox" value="{{ productos.index(p) }}"></td>
+                        </tr>
+                    {% endfor %}
+                </table>
+
+                <br><br>
+                <table style="width:85%; border-collapse:collapse;" align="center"> 
+                    <tr>
+                        <td>
+                            Tarjeta:
+                            <input type="text" class="input_compra" name="tarjeta" placeholder="4777-2333-3223-7654">
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            Dirección:
+                        <input type="text" class="input_compra" name="direccion" placeholder="Av. Diagonal 435 "></td>
+                    </tr>  
+                    <tr>
+                        <td>
+                            Ciudad: 
+                        <input type="text" class="input_compra" name="ciudad" placeholder="Barcelona">
+                        </td>
+                    </tr>  
+                    <tr>
+                        <td>
+                            Codigo postal:
+                            <input type="text" class="input_compra" name="codigo_postal" placeholder="08028">
+                        </td>
+                    </tr>  
+                    <tr>
+                        <td>Prioridad del envio: 
+                            <input type="text" class="input_compra" name="prioridad" placeholder="1 ... 10">
+                        </td>
+                    </tr>
+                    <tr> 
+                        <td> 
+                            <input type="submit" name="submit" value="Comprar">
+                        </td>
+                    </tr>
+                </table>
+            </form>
+        {% endif %}
+        <br>
+        
+</body>
+</html>

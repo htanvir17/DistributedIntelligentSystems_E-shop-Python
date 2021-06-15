@@ -1,0 +1,377 @@
+import argparse
+import socket
+import sys
+from multiprocessing import Queue, Process
+from threading import Thread
+
+from flask import Flask, request
+from rdflib import Namespace, Graph, RDF, URIRef, Literal, XSD
+from AgentUtil.ACLMessages import get_agent_info, send_message, build_message, get_message_properties, register_agent,get_Neareast_Logistic_Center_info
+from AgentUtil.Agent import Agent
+from AgentUtil.FlaskServer import shutdown_server
+from AgentUtil.Logging import config_logger
+from AgentUtil.OntoNamespaces import ECSDIAmazon, ACL, DSO
+from rdflib.namespace import RDF, FOAF
+from string import Template
+import uuid
+from datetime import datetime,timedelta
+
+
+
+
+#definimos los parametros de entrada (linea de comandos)
+parser = argparse.ArgumentParser()
+parser.add_argument('--open', help="Define si el servidor esta abierto al exterior o no", action='store_true', default=False)
+parser.add_argument('--port', type=int, help="Puerto de comunicacion del agente")
+parser.add_argument('--dhost', default=socket.gethostname(), help="Host del agente de directorio")
+parser.add_argument('--dport', type=int, help="Puerto de comunicacion del agente de directorio")
+
+# configuramos logger para imprimir
+logger = config_logger(level=1) #1 para registrar todo (error i info)
+
+# parsear los parametros de entrada
+args = parser.parse_args()
+if args.port is None:
+    port = 9003
+else:
+    port = args.port
+
+if args.open is None:
+    hostname = '0.0.0.0'
+else:
+    hostname = '127.0.0.1'
+
+if args.dport is None:
+    dport = 9000
+else:
+    dport = args.dport
+
+if args.dhost is None:
+    dhostname = '127.0.0.1'
+else:
+    dhostname = args.dhost
+
+
+#definimos un espacio de nombre
+agn = Namespace("http://www.agentes.org#")
+
+# Contador de mensajes, por si queremos hacer un seguimiento
+mss_cnt = 0
+
+#crear agente
+AgenteGestorDeVentas = Agent('AgenteGestorDeVentas', agn.AgenteGestorDeVentas,
+                          'http://%s:%d/comm' % (hostname, port),'http://%s:%d/Stop' % (hostname, port))
+
+
+# direccion del agente directorio
+DirectoryAgent = Agent('DirectoryAgent',
+                       agn.Directory,
+                       'http://%s:%d/Register' % (dhostname, dport),
+                       'http://%s:%d/Stop' % (dhostname, dport))
+
+
+# Global triplestore graph
+dsGraph = Graph()
+# Queue
+queue = Queue()
+#crear aplicacion servidor
+app = Flask(__name__)
+
+def get_message_count():
+    global mss_cnt
+    if mss_cnt is None:
+        mss_cnt = 0
+    mss_cnt += 1
+    return mss_cnt
+def calcularprobablefechadeenvio(prioridad):
+    """Calcula el dia aproximado de envio apartir de la prioridad(1-10),ahora es un factor de 1 y sumando 1dia extra"""
+    x = datetime.now() + timedelta(days= (prioridad*1)+ 1) 
+    return x.strftime('%Y-%m-%d') 
+
+
+def registrarVenta(grafo):
+    """ Funcion que registra la venta realizada a la base de datos"""
+    logger.info("Registrando la venta")
+    
+    venta_id = uuid.uuid4()
+    direccion = ciudad = ""
+    tarjeta = prioridad = codigo_postal = 0
+    id_productos = []
+
+    for s,p,o in grafo:
+        if str(p) == ECSDIAmazon + "Tarjeta":
+            tarjeta = str(o)
+        elif str(p) == ECSDIAmazon + "Prioridad":
+            prioridad = str(o)
+        elif str(p) == ECSDIAmazon + "Direccion":
+            direccion = str(o)
+        elif str(p) == ECSDIAmazon + "Ciudad":
+            ciudad = str(o)
+        elif str(p) == ECSDIAmazon + "Codigo_postal":
+            codigo_postal = str(o)
+        elif str(p) == ECSDIAmazon + "Id_producto":
+            id_productos.append(str(o))
+    
+
+    venta = Graph()
+    venta.parse("./rdf/ventas.rdf")
+
+    nueva_venta = ECSDIAmazon.__getattr__(str(venta_id))
+    venta.add((nueva_venta, RDF.type, Literal(ECSDIAmazon + "venta")))
+    venta.add((nueva_venta, ECSDIAmazon.Venta_id, Literal(venta_id)))
+    venta.add((nueva_venta, ECSDIAmazon.Tarjeta, Literal(tarjeta)))
+    venta.add((nueva_venta, ECSDIAmazon.Prioridad, Literal(prioridad)))
+    venta.add((nueva_venta, ECSDIAmazon.Direccion, Literal(direccion)))
+    venta.add((nueva_venta, ECSDIAmazon.Ciudad, Literal(ciudad)))
+    venta.add((nueva_venta, ECSDIAmazon.Codigo_postal, Literal(codigo_postal)))
+    venta.add((nueva_venta, ECSDIAmazon.Productos_id, Literal(id_productos)))
+    
+    logger.info("Escribiendo la venta "+ str(venta_id) + " en la BD")
+    venta.serialize("./rdf/ventas.rdf")
+    logger.info("Registro de venta finalizado")
+    return venta_id
+
+
+def cobroVenta(precio_quasi_total,precio_envio,tarjeta):
+    """Se comunica con el agente financiero para que realice el cobro""" 
+    agente_financiero = get_agent_info(agn.AgenteFinanciero, DirectoryAgent, AgenteGestorDeVentas, get_message_count())
+    logger.info("Enviando peticion de cobro al AgenteFinanciero")
+
+    grafo_transaccion = Graph()
+    precio_total_final = precio_quasi_total + precio_envio
+    contenido = ECSDIAmazon["Transferencia_cobro"+ str(get_message_count())]
+    grafo_transaccion.add((contenido, RDF.type, ECSDIAmazon.Transferencia_cobrar))
+    grafo_transaccion.add((contenido, ECSDIAmazon.Tarjeta, Literal(tarjeta, datatype=XSD.string)))
+    grafo_transaccion.add((contenido, ECSDIAmazon.Precio_total, Literal(precio_total_final, datatype=XSD.int)))
+    
+
+    respuesta_cobro = send_message(build_message(
+            grafo_transaccion, perf=ACL.request, sender=AgenteGestorDeVentas.uri, receiver=agente_financiero.uri, msgcnt=get_message_count(), 
+            content=contenido), agente_financiero.address)
+
+    transferencia = respuesta_cobro.value(predicate=RDF.type, object=ECSDIAmazon.Transferencia)
+ 
+    if "Exitosa" == str(respuesta_cobro.value(subject=transferencia, predicate=ECSDIAmazon.Estado)):
+        logger.info("Se ha cobrado la venta exitosamente")
+    else:
+        logger.info("No se ha podido cobrar la venta exitosamente")
+        # mensaje = "Ohoh no se ha podido cobrar a el precio de la venta "
+    
+    logger.info("Se genera el informe con la información de cobro")
+    grafo_transaccion = Graph()
+    contenido = ECSDIAmazon["Informar"+ str(get_message_count())]
+    grafo_transaccion.add((contenido, RDF.type, ECSDIAmazon.Informar))
+    grafo_transaccion.add((contenido, ECSDIAmazon.Tarjeta, Literal(tarjeta, datatype=XSD.string)))
+    grafo_transaccion.add((contenido, ECSDIAmazon.Precio_total, Literal(precio_total_final, datatype=XSD.float)))
+    # grafo_transaccion.add((contenido, ECSDIAmazon.Mensaje, Literal(mensaje, datatype=XSD.string)))
+    
+    return grafo_transaccion
+
+
+
+def enviarVenta(contenido,grafo):
+    '''Se encarga de enviar asignar el encargo de envio al centro logistico mas cercano al codigo postal'''
+    
+    centrologistico = get_agent_info(agn.AgenteCL, DirectoryAgent, AgenteGestorDeVentas, get_message_count())       
+
+    grafo.remove((contenido, RDF.type, ECSDIAmazon.Iniciar_venta))
+    sujeto = ECSDIAmazon['Encargo_envio' + str(get_message_count())]
+    grafo.add((sujeto, RDF.type, ECSDIAmazon.Encargo_envio))
+    for a, b, c in grafo:
+        if a == contenido:
+            grafo.remove((a, b, c))
+            grafo.add((sujeto, b, c))
+  
+    logger.info("Informando de encargo de envio a centro logistico")
+    msg_respuesta = send_message(build_message(
+                                grafo, perf=ACL.request, sender=AgenteGestorDeVentas.uri,receiver=centrologistico.uri,msgcnt=get_message_count(), content=sujeto)
+                                , centrologistico.address)
+    logger.info("El encargo de envio, ya ha sido enviado por el centro logistico")
+
+    respuesta_centro_logistico = msg_respuesta.value(predicate=RDF.type, object=ECSDIAmazon.Respuesta)
+    
+    if "Enviado" == str(msg_respuesta.value(subject=respuesta_centro_logistico, predicate=ECSDIAmazon.Mensaje)) :
+        
+        fecha_final = str(msg_respuesta.value(subject=respuesta_centro_logistico, predicate=ECSDIAmazon.Fecha_final))
+        transportista_asignado = str(msg_respuesta.value(subject=respuesta_centro_logistico, predicate=ECSDIAmazon.Transportista_asignado))
+        precio_envio = float(msg_respuesta.value(subject=respuesta_centro_logistico, predicate=ECSDIAmazon.Precio_envio))
+        
+        precio_quasi_total = grafo.value(subject=sujeto, predicate=ECSDIAmazon.Precio_total)
+        tarjeta = str(grafo.value(subject=sujeto, predicate=ECSDIAmazon.Tarjeta))
+        
+        logger.info("Se prodece al cobro")
+        grafinfo = cobroVenta(precio_quasi_total, precio_envio, tarjeta) #me envia un grafo de respuesta del cobro
+        informar=grafinfo.value(predicate=RDF.type, object=ECSDIAmazon.Informar)
+        grafinfo.add((informar, ECSDIAmazon.Precio_envio, Literal(precio_envio, datatype=XSD.float)))
+        grafinfo.add((informar, ECSDIAmazon.Precio_venta, Literal(precio_quasi_total, datatype=XSD.float)))
+        grafinfo.add((informar, ECSDIAmazon.Fecha_final, Literal(fecha_final, datatype=XSD.string)))
+        grafinfo.add((informar, ECSDIAmazon.Transportista_asignado, Literal(transportista_asignado, datatype=XSD.string)))
+        idventa = grafo.value(subject=sujeto, predicate=ECSDIAmazon.Id_venta)
+        grafinfo.add((informar, ECSDIAmazon.Id_venta, Literal(idventa, datatype=XSD.int)))
+        logger.info("Se informa al usuario que la venta con id "+str(idventa)+ " ha sido enviada y cobrada")
+
+        agente_usuario = get_agent_info(agn.AgenteUsuario, DirectoryAgent, AgenteGestorDeVentas, get_message_count())
+        msg_respuesta_user = send_message(build_message(
+                                grafinfo, perf=ACL.request, sender=AgenteGestorDeVentas.uri,receiver=agente_usuario.uri,msgcnt=get_message_count(), content=informar)
+                                , agente_usuario.address)
+        respuesta_user= msg_respuesta_user.value(predicate=RDF.type, object=ECSDIAmazon.Respuesta)
+
+        if "OK" == str(msg_respuesta_user.value(subject=respuesta_user, predicate=ECSDIAmazon.Mensaje)):
+            logger.info("Finalizado proceso de la venta " + str(idventa) +",la creación, el envio y el cobro de esta han sido exitosos")
+        else:
+            logger.info("No se esperaba esta respuesta del usuario al enviarle el informe")    
+    else:
+        logger.info("No se esperaba esta respuesta del centro logistico")
+
+
+def vender_productos(contenido, grafo):
+    """Funcion que efectua el proceso de venta, distribuyendo la responsabilidad de distribucion a un thread"""
+    
+    logger.info("Peticion de venta recibida")
+    # guardar la venta en la BD
+    idventa = registrarVenta(grafo)
+    grafo.add((contenido, ECSDIAmazon.Id_venta, Literal(idventa, datatype=XSD.int)))
+    tarjeta = grafo.value(subject=contenido, predicate=ECSDIAmazon.Tarjeta)
+
+    grafo_factura = Graph()
+    grafo_factura.bind('default', ECSDIAmazon)
+
+    logger.info("Generando factura")
+    # Crear factura
+    nueva_factura = ECSDIAmazon['Factura' + str(get_message_count())]
+    grafo_factura.add((nueva_factura, RDF.type, ECSDIAmazon.Factura))
+    grafo_factura.add((nueva_factura, ECSDIAmazon.Tarjeta, Literal(tarjeta, datatype=XSD.string)))
+
+    venta = grafo.value(subject=contenido, predicate=ECSDIAmazon.De)
+
+    precio_total = 0.0
+    for producto in grafo.objects(subject=venta, predicate=ECSDIAmazon.Contiene):
+        grafo_factura.add((producto, RDF.type, ECSDIAmazon.Producto))
+
+        nombreProducto = grafo.value(subject=producto, predicate=ECSDIAmazon.Nombre_producto)
+        grafo_factura.add((producto, ECSDIAmazon.Nombre_producto, Literal(nombreProducto, datatype=XSD.string)))
+
+        precioProducto = grafo.value(subject=producto, predicate=ECSDIAmazon.Precio_producto)
+        grafo_factura.add((producto, ECSDIAmazon.Precio_producto, Literal(float(precioProducto), datatype=XSD.float)))
+        
+        precio_total += float(precioProducto)
+
+        grafo_factura.add((nueva_factura, ECSDIAmazon.FormadaPor, URIRef(producto)))
+    
+    precio_total =  round(precio_total,2)
+    prioridad = grafo.value(subject=contenido,predicate=ECSDIAmazon.Prioridad)
+    grafo_factura.add((nueva_factura, ECSDIAmazon.Fecha_aproximada, Literal(calcularprobablefechadeenvio(int(prioridad)), datatype=XSD.string)))
+    grafo_factura.add((nueva_factura, ECSDIAmazon.Precio_total, Literal(precio_total, datatype=XSD.float)))
+    grafo_factura.add((nueva_factura, ECSDIAmazon.Id_venta, Literal(idventa, datatype=XSD.string)))
+
+    #Es estrictamente necesario la siguiente parte porque ya ponemos el precio_total al grafo ya que sera usado por el metodo enviarVenta
+    ini_venta = grafo.value(predicate=RDF.type, object=ECSDIAmazon.Iniciar_venta)
+    grafo.add((ini_venta, ECSDIAmazon.Precio_total, Literal(precio_total, datatype=XSD.float)))
+
+    # Se envia encargo de envio al Centro logistico
+    thread = Thread(target=enviarVenta, args=(contenido,grafo))
+    thread.start()
+    logger.info("Enviando factura")
+    return grafo_factura
+
+@app.route("/comm")
+def communication():
+    message = request.args['content'] #cogo el contenido enviado
+    grafo = Graph()
+    grafo.parse(data=message)
+    # logger.info('--Envian una comunicacion')
+    message_properties = get_message_properties(grafo)
+
+    resultado_comunicacion = None
+
+    if message_properties is None:
+        # Respondemos que no hemos entendido el mensaje
+        resultado_comunicacion = build_message(Graph(), ACL['not-understood'],
+                                              sender=AgenteGestorDeVentas.uri, msgcnt=get_message_count())
+    else:
+        # Obtenemos la performativa
+        if message_properties['performative'] != ACL.request:
+            # Si no es un request, respondemos que no hemos entendido el mensaje
+            resultado_comunicacion = build_message(Graph(), ACL['not-understood'],
+                                                  sender=AgenteGestorDeVentas.uri, msgcnt=get_message_count())
+        else:
+            #Extraemos el contenido que ha de ser una accion de la ontologia 
+            contenido = message_properties['content']
+            accion = grafo.value(subject=contenido, predicate=RDF.type)
+            logger.info("La accion es: " + accion)
+            # Si la acción es de tipo iniciar_venta empezamos
+            if accion == ECSDIAmazon.Iniciar_venta:
+                for item in grafo.subjects(RDF.type, ACL.FipaAclMessage):
+                        grafo.remove((item, None, None))
+                resultado_comunicacion = vender_productos(contenido, grafo)
+                
+    logger.info('Antes de serializar la respuesta')
+    serialize = resultado_comunicacion.serialize(format='xml')
+
+    return serialize, 200
+
+
+
+@app.route("/Stop")
+def stop():
+    """
+    Entrypoint to the agent
+    :return: string
+    """
+
+    tidyUp()
+    shutdown_server()
+    return "Stopping server"
+
+
+
+#función llamada antes de cerrar el servidor
+def tidyUp():
+    """
+    Previous actions for the agent.
+    """
+
+    global queue
+    queue.put(0)
+
+    pass
+
+
+#función para registro de agente en el servicio de directorios
+def register_message():
+    """
+    Envia un mensaje de registro al servicio de registro
+    usando una performativa Request y una accion Register del
+    servicio de directorio
+
+    :param gmess:
+    :return:
+    """
+
+    logger.info('Nos registramos')
+    gr = register_agent(AgenteGestorDeVentas, DirectoryAgent, agn.AgenteGestorDeVentas, get_message_count())
+    return gr
+
+
+
+#funcion llamada al principio de un agente
+def filterBehavior(queue):
+    """
+    Agent Behaviour in a concurrent thread.
+    :param queue: the queue
+    :return: something
+    """
+    graf = register_message()
+    pass
+
+if __name__ == '__main__':
+    # Run behaviors
+    ab1 = Process(target=filterBehavior, args=(queue,))
+    ab1.start()
+
+    # Run server
+    app.run(host=hostname, port=port, debug=True)
+
+    # Wait behaviors
+    ab1.join()
+    print('The End')
